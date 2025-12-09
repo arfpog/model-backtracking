@@ -1,0 +1,19 @@
+# Canonical model configurations used across the pipeline.
+models:
+  - name: deepseek-r1-7b
+    hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+    type: reasoning
+    dtype: bfloat16
+    notes: primary reasoning/backtracking model
+
+  - name: deepseek-r1-1_5b
+    hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+    type: reasoning
+    dtype: bfloat16
+    notes: lightweight reasoning baseline
+
+  - name: qwen1_5-7b-base
+    hf_id: Qwen/Qwen1.5-7B
+    type: base
+    dtype: bfloat16
+    notes: base model for diffing vs reasoning variant

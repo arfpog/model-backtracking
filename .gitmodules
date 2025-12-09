@@ -1,0 +1,3 @@
+[submodule "third_party/reasoning_models_probing"]
+	path = third_party/reasoning_models_probing
+	url = https://github.com/AngelaZZZ-611/reasoning_models_probing

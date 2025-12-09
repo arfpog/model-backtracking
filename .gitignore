@@ -1,0 +1,18 @@
+# Large/third-party
+third_party/
+
+# Local instructions/docs
+instructions.md
+project_tasklist.md
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Env / models / data artifacts
+.env
+models/
+data/
+results/
+notebooks/.ipynb_checkpoints

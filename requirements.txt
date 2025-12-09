@@ -1,0 +1,23 @@
+# Core DL + HF
+torch
+transformers
+accelerate
+datasets
+huggingface_hub
+sentencepiece
+
+# NLP utilities
+spacy
+
+# Data handling / metrics
+numpy
+pandas
+scikit-learn
+jsonlines
+
+# Training utils
+wandb
+
+# Misc
+pyyaml
+tqdm

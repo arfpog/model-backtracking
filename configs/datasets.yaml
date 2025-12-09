@@ -1,0 +1,37 @@
+# Datasets to pull into data/raw as JSONL.
+datasets:
+  - name: gsm8k_train
+    hf_id: openai/gsm8k
+    subset: main
+    split: train[:2000]
+    text_field: question
+    answer_field: answer
+    output_name: gsm8k_train.jsonl
+
+  - name: gsm8k_test
+    hf_id: openai/gsm8k
+    subset: main
+    split: test
+    text_field: question
+    answer_field: answer
+    output_name: gsm8k_test.jsonl
+
+  - name: math_easy
+    hf_id: hendrycks/competition_math
+    split: train[:1000]
+    text_field: problem
+    answer_field: solution
+    output_name: math_easy.jsonl
+
+  - name: aqua_rat
+    hf_id: aqua_rat
+    split: train[:2000]
+    text_field: question
+    answer_field: correct
+    choices_field: options
+    output_name: aqua_rat.jsonl
+
+  - name: synthetic_backtracking
+    local_path: data/raw/synthetic_backtracking.jsonl
+    description: placeholder for controlled synthetic set; place file at local_path
+    skip_download: true
