@@ -9,13 +9,20 @@ Expected output:
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import torch
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .utils import extract_intermediate_answer, read_jsonl, write_jsonl
+try:
+    from .utils import extract_intermediate_answer, read_jsonl, write_jsonl
+except ImportError:
+    # Allow running as a script: python src/pipeline/generate_cot.py ...
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
+    from src.pipeline.utils import extract_intermediate_answer, read_jsonl, write_jsonl
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -99,15 +106,18 @@ def main() -> None:
         model.to(device)
     model.eval()
 
+    print(f"[generate_cot] Loading input from {args.input}")
     data = load_input(Path(args.input))
+    print(f"[generate_cot] Loaded {len(data)} rows (dataset={args.dataset}, model={args.model})")
     if args.max_examples:
         data = data[: args.max_examples]
+        print(f"[generate_cot] Truncated to first {len(data)} rows due to --max-examples")
 
     default_out = Path("data/cot") / args.model / f"{args.dataset}_rollouts.jsonl"
     output_path = args.output or default_out
 
     rows: List[Dict[str, Any]] = []
-    for idx, example in enumerate(data):
+    for idx, example in enumerate(tqdm(data, desc="Generating")):
         question = example.get(args.question_field)
         gt_answer = example.get(args.answer_field)
         example_id = example.get(args.id_field, idx)
@@ -151,7 +161,13 @@ def main() -> None:
         )
 
     write_jsonl(output_path, rows)
-    print(f"Wrote {len(rows)} examples to {output_path}")
+    print(f"[generate_cot] Wrote {len(rows)} examples to {output_path}")
+    # Preview a couple of generations
+    for sample in rows[:3]:
+        cot_preview = sample["full_cot"][:200].replace("\n", " ")
+        print(
+            f"[preview] id={sample['example_id']} | q={str(sample['question'])[:80]}... | cot={cot_preview}..."
+        )
 
 
 if __name__ == "__main__":
