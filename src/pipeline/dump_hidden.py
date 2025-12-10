@@ -1,5 +1,8 @@
 #!/usr/bin/env python
+
 import argparse
+import json
+import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
@@ -7,7 +10,11 @@ import torch
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .utils import read_jsonl
+try:
+    from .utils import read_jsonl
+except ImportError:
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
+    from src.pipeline.utils import read_jsonl
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,12 +24,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", help="Dataset name (for naming outputs).")
     parser.add_argument("--layer", type=int, default=-1, help="Layer to extract (default last).")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size for forward pass.")
-    parser.add_argument("--shard-size", type=int, default=512, help="Number of examples per shard.")
+    parser.add_argument("--shard-size", type=int, default=512, help="Number of rows per shard.")
     parser.add_argument("--max-length", type=int, default=2048, help="Tokenizer max length.")
     parser.add_argument(
         "--prompt-prefix",
         default="Please reason step by step, and put your final answer within \\boxed{}.",
         help="Instruction appended after the question before chunk text.",
+    )
+    parser.add_argument(
+        "--position-mode",
+        choices=["last", "chunk_end", "chunk_start", "custom"],
+        default="last",
+        help="Where to read hidden states. Custom reads explicit positions JSON.",
+    )
+    parser.add_argument(
+        "--positions-json",
+        type=Path,
+        help="JSON mapping example_id -> chunk_idx -> list of token positions (only for custom mode).",
     )
     parser.add_argument(
         "--output-dir",
@@ -60,13 +78,61 @@ def build_prompt(question: str, prefix: str, merged_chunks: str) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
-def iter_prompts(records: List[Dict], prefix: str) -> Iterable[Tuple[str, Dict]]:
+def load_positions_map(path: Path) -> Dict[str, Dict[str, List[int]]]:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return {str(ex): {str(k): v for k, v in chunk_map.items()} for ex, chunk_map in data.items()}
+
+
+def compute_offsets(tokenizer, question: str, prefix: str, chunks: List[str], idx: int) -> Tuple[int, int, int]:
+    """
+    Returns (prompt_len, chunk_start_idx, chunk_end_idx) in token space for chunk idx,
+    using the same prompt construction as the forward pass.
+    """
+    base_prompt = build_prompt(question, prefix, "")
+    base_len = len(tokenizer(base_prompt, add_special_tokens=True).input_ids)
+
+    merged_text = "\n\n".join(chunks[: idx + 1])
+    prompt = build_prompt(question, prefix, merged_text)
+    prompt_len = len(tokenizer(prompt, add_special_tokens=True).input_ids)
+
+    if idx == 0:
+        prev_len = base_len
+    else:
+        prev_merged = "\n\n".join(chunks[:idx])
+        prev_prompt = build_prompt(question, prefix, prev_merged)
+        prev_len = len(tokenizer(prev_prompt, add_special_tokens=True).input_ids)
+
+    chunk_start = prev_len
+    chunk_end = prompt_len - 1
+    return prompt_len, chunk_start, chunk_end
+
+
+def iter_prompts(records: List[Dict], tokenizer, prefix: str, position_mode: str, positions_map=None):
     for record in records:
         question = record.get("question", "")
-        example_id = record.get("example_id")
+        example_id = str(record.get("example_id"))
+        chunk_texts = [c.get("text", "") for c in record.get("chunks", [])]
+
         for idx, chunk in enumerate(record.get("chunks", [])):
-            merged_text = "\n\n".join(c.get("text", "") for c in record["chunks"][: idx + 1])
-            prompt = build_prompt(question, prefix, merged_text)
+            prompt_len, chunk_start, chunk_end = compute_offsets(
+                tokenizer, question, prefix, chunk_texts, idx
+            )
+            prompt = build_prompt(question, prefix, "\n\n".join(chunk_texts[: idx + 1]))
+
+            if position_mode == "last":
+                positions = [prompt_len - 1]
+            elif position_mode == "chunk_start":
+                positions = [chunk_start]
+            elif position_mode == "chunk_end":
+                positions = [chunk_end]
+            elif position_mode == "custom" and positions_map:
+                positions = positions_map.get(example_id, {}).get(str(idx), [])
+                if not positions:
+                    positions = [chunk_end]
+            else:
+                positions = [chunk_end]
+
             meta = {
                 "example_id": example_id,
                 "chunk_idx": idx,
@@ -74,13 +140,14 @@ def iter_prompts(records: List[Dict], prefix: str) -> Iterable[Tuple[str, Dict]]
                 "is_correct": chunk.get("is_correct"),
                 "is_stable": chunk.get("is_stable"),
                 "is_backtrack_start": chunk.get("is_backtrack_start"),
+                "positions": positions,
             }
-            yield prompt, meta
+            yield prompt, positions, meta
 
 
-def last_token_hidden_states(model, tokenizer, prompts: List[str], max_length: int, layer_idx: int):
+def gather_positions(model, tokenizer, prompts: List[str], positions: List[List[int]], max_length: int, layer_idx: int):
     tokenizer.padding_side = "left"
-    inputs = tokenizer(
+    encodings = tokenizer(
         prompts,
         return_tensors="pt",
         padding=True,
@@ -88,8 +155,8 @@ def last_token_hidden_states(model, tokenizer, prompts: List[str], max_length: i
         max_length=max_length,
     )
     device = model_device(model)
-    input_ids = inputs["input_ids"].to(device)
-    attention_mask = inputs["attention_mask"].to(device)
+    input_ids = encodings["input_ids"].to(device)
+    attention_mask = encodings["attention_mask"].to(device)
 
     with torch.no_grad():
         outputs = model(
@@ -99,18 +166,32 @@ def last_token_hidden_states(model, tokenizer, prompts: List[str], max_length: i
         )
         hidden = outputs.hidden_states
 
-    lengths = attention_mask.sum(dim=1) - 1
-    batch_indices = torch.arange(lengths.shape[0], device=lengths.device)
     layer = hidden[layer_idx]
-    selected = layer[batch_indices, lengths, :].detach().cpu()
-    return selected
+    out_tensors: List[torch.Tensor] = []
+    out_indices: List[Tuple[int, int]] = []
+
+    seq_lens = attention_mask.sum(dim=1)
+    max_len = input_ids.shape[1]
+    
+    for b_idx, pos_list in enumerate(positions):
+        seq_len = seq_lens[b_idx].item()
+        pad_offset = max_len - seq_len  # FIX: account for left padding
+        
+        for pos in pos_list:
+            if pos < 0 or pos >= seq_len:
+                continue
+            adjusted_pos = pos + pad_offset  # FIX: adjust index
+            out_tensors.append(layer[b_idx, adjusted_pos, :].detach().cpu())
+            out_indices.append((b_idx, pos))  # keep original pos for metadata
+
+    return out_tensors, out_indices
 
 
 def save_shard(output_dir: Path, shard_idx: int, tensors: List[torch.Tensor], meta: List[Dict]) -> None:
     if not tensors:
         return
     output_dir.mkdir(parents=True, exist_ok=True)
-    tensor = torch.cat(tensors, dim=0)
+    tensor = torch.stack(tensors, dim=0)
     path = output_dir / f"part-{shard_idx:04d}.pt"
     torch.save({"hidden_states": tensor, "meta": meta}, path)
     print(f"Saved shard {shard_idx} -> {path} ({tensor.shape[0]} rows)")
@@ -138,8 +219,14 @@ def main() -> None:
         model.to(device)
     model.eval()
 
+    positions_map = None
+    if args.position_mode == "custom":
+        if not args.positions_json:
+            raise SystemExit("Custom mode requires --positions-json.")
+        positions_map = load_positions_map(args.positions_json)
+
     records = read_jsonl(args.input)
-    prompt_meta = list(iter_prompts(records, args.prompt_prefix))
+    prompt_meta = list(iter_prompts(records, tokenizer, args.prompt_prefix, args.position_mode, positions_map))
     if not prompt_meta:
         print("No chunks found in input; nothing to encode.")
         return
@@ -150,19 +237,28 @@ def main() -> None:
 
     for start in tqdm(range(0, len(prompt_meta), args.batch_size), desc="Encoding"):
         batch = prompt_meta[start : start + args.batch_size]
-        prompts, metas = zip(*batch)
-        hidden = last_token_hidden_states(model, tokenizer, list(prompts), args.max_length, args.layer)
-        buffer_tensors.append(hidden)
-        buffer_meta.extend(metas)
+        prompts, positions_batch, metas = zip(*batch)
+        tensors, indices = gather_positions(
+            model,
+            tokenizer,
+            list(prompts),
+            list(positions_batch),
+            args.max_length,
+            args.layer,
+        )
+        for tensor, (b_idx, pos) in zip(tensors, indices):
+            meta_entry = dict(metas[b_idx])
+            meta_entry["position"] = pos
+            buffer_tensors.append(tensor)
+            buffer_meta.append(meta_entry)
 
-        if sum(t.shape[0] for t in buffer_tensors) >= args.shard_size:
+        if len(buffer_tensors) >= args.shard_size:
             save_shard(output_dir, shard_idx, buffer_tensors, buffer_meta)
             buffer_tensors, buffer_meta = [], []
             shard_idx += 1
 
     if buffer_tensors:
         save_shard(output_dir, shard_idx, buffer_tensors, buffer_meta)
-
 
 if __name__ == "__main__":
     main()
