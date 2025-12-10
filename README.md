@@ -1,55 +1,26 @@
 # Backtracking Interpretability
 
-Goal: one pipeline that emits a canonical trace bundle (question, full CoT, chunks, intermediate answers, correctness/stability/backtrack tags, hidden states) so we can train probes for backtracking and information gain.
+We want to understand when reasoning models change their mind, and whether that helps. Three questions: will the answer change (stability), will backtracking help (productive vs not), and how early we can tell.
 
-## Layout
-- `configs/` model + dataset YAMLs
-- `scripts/` env setup, data download, model download
-- `src/pipeline/` generation, chunking, labeling, reps
-- `src/probes/` base probe definitions (linear/MLP)
-- `data/`, `results/`, `notebooks/`
-- `third_party/` Zhang et al. repo (kept only for reference)
+Pipeline (one artifact per example):
+- generate a chain-of-thought (full trace)
+- split into chunks
+- tag intermediate answers and correctness/stability/backtrack markers (regex by default, Gemini optional)
+- grab hidden states at chunk boundaries
+- train small probes on top
 
-## Quickstart
-Install deps and spaCy model:
+Repo map: configs (models/datasets), scripts (env/data/model pulls), src/pipeline (generation→chunking→labeling→reps), src/probes (linear/MLP heads), data/results/notebooks, third_party (Zhang et al. for reference only).
+
+Quick start:
 ```bash
 bash scripts/setup_env.sh
-```
-Pull datasets/models (edit configs as needed):
-```bash
 bash scripts/get_data.sh
 bash scripts/pull_models.sh
+
+python -m src.pipeline.generate_cot --model gpt2 --dataset toy --input data/raw/toy.jsonl --max-examples 5
+python -m src.pipeline.chunk_cot --input data/cot/gpt2/toy_rollouts.jsonl --dataset toy
+python -m src.pipeline.label_intermediate --input data/chunks/segmented_toy.jsonl --dataset toy
+python -m src.pipeline.dump_hidden --input data/labeled/labeled_intermediate_toy.jsonl --model gpt2 --dataset toy
 ```
 
-Run the pipeline on a small slice (example with a tiny model):
-```bash
-# 1) Generate CoT
-python -m src.pipeline.generate_cot \
-  --model gpt2 \
-  --dataset toy \
-  --input data/raw/toy.jsonl \
-  --question-field question \
-  --answer-field answer \
-  --max-examples 5 \
-  --max-new-tokens 128
-
-# 2) Chunk
-python -m src.pipeline.chunk_cot \
-  --input data/cot/gpt2/toy_rollouts.jsonl \
-  --dataset toy
-
-# 3) Label
-python -m src.pipeline.label_intermediate \
-  --input data/chunks/segmented_toy.jsonl \
-  --dataset toy
-
-# 4) Hidden states (keep batch-size small for large models)
-python -m src.pipeline.dump_hidden \
-  --input data/labeled/labeled_intermediate_toy.jsonl \
-  --model gpt2 \
-  --dataset toy \
-  --batch-size 2 \
-  --max-length 512
-```
-
-Notes: Pipeline uses only local Hugging Face + spaCy; no third_party code is invoked. Labeling supports regex or Gemini (set `GEMINI_API_KEY`, install `google-genai`). Adjust batch sizes and max length for bigger models. Probes live under `src/probes/` and expect reps + labels.
+Notes: Pipeline is local Hugging Face + spaCy. Gemini labeling is available with `--labeling-mode gemini` and `GEMINI_API_KEY`. Probes are simple linear/MLP heads in `src/probes/base_probe.py`; training scripts are up to you.***
