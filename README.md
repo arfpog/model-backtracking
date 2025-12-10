@@ -2,14 +2,12 @@
 
 We want to understand when reasoning models change their mind, and whether that helps. Three questions: will the answer change (stability), will backtracking help (productive vs not), and how early we can tell.
 
-Pipeline (one artifact per example):
+Current pipeline:
 - generate a chain-of-thought (full trace)
 - split into chunks
-- tag intermediate answers and correctness/stability/backtrack markers (regex by default, Gemini optional)
+- tag intermediate answers and correctness/stability/backtrack markers (regex or Gemini)
 - grab hidden states at chunk boundaries
 - train small probes on top
-
-Repo map: configs (models/datasets), scripts (env/data/model pulls), src/pipeline (generation→chunking→labeling→reps), src/probes (linear/MLP heads), data/results/notebooks, third_party (Zhang et al. for reference only).
 
 Quick start:
 ```bash
@@ -23,4 +21,4 @@ python -m src.pipeline.label_intermediate --input data/chunks/segmented_toy.json
 python -m src.pipeline.dump_hidden --input data/labeled/labeled_intermediate_toy.jsonl --model gpt2 --dataset toy
 ```
 
-Notes: Pipeline is local Hugging Face + spaCy. Gemini labeling is available with `--labeling-mode gemini` and `GEMINI_API_KEY`. Probes are simple linear/MLP heads in `src/probes/base_probe.py`; training scripts are up to you.***
+Gemini labeling is available with `--labeling-mode gemini` and `GEMINI_API_KEY`.
