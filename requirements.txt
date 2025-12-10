@@ -21,3 +21,4 @@ wandb
 # Misc
 pyyaml
 tqdm
+google-genai  # optional: needed only for Gemini-based labeling

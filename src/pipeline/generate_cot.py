@@ -1,10 +1,4 @@
 #!/usr/bin/env python
-"""
-Stage 01: generate chain-of-thought rollouts from a reasoning model.
-
-Expected output:
-- data/cot/<model>/<dataset>_rollouts.jsonl (one JSON object per example)
-"""
 
 import argparse
 import json

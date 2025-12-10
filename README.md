@@ -1,36 +1,55 @@
 # Backtracking Interpretability
 
-Shared pipeline for studying backtracking and information gain in reasoning models (e.g., DeepSeek-R1). The goal is to produce standardized reasoning traces + labels + hidden states, then plug RQ-specific probes on top.
+Goal: one pipeline that emits a canonical trace bundle (question, full CoT, chunks, intermediate answers, correctness/stability/backtrack tags, hidden states) so we can train probes for backtracking and information gain.
 
-## Repository layout
-- `configs/`: YAML configs for models and datasets.
-- `data/`: raw → chunked → labeled → representation artifacts.
-- `scripts/`: environment setup, data pulls, model downloads.
-- `src/`: pipeline and probe code (to be added).
-- `third_party/reasoning_models_probing`: Zhang et al. repo as a submodule (trace generation utilities).
-- `notebooks/`, `results/`: analysis and outputs.
+## Layout
+- `configs/` model + dataset YAMLs
+- `scripts/` env setup, data download, model download
+- `src/pipeline/` generation, chunking, labeling, reps
+- `src/probes/` base probe definitions (linear/MLP)
+- `data/`, `results/`, `notebooks/`
+- `third_party/` Zhang et al. repo (kept only for reference)
 
-## Setup
-1) Create the conda env and install deps:
+## Quickstart
+Install deps and spaCy model:
 ```bash
-bash scripts/setup_env.sh  # optional: ENV_NAME=myenv PYTHON_VERSION=3.11 bash scripts/setup_env.sh
+bash scripts/setup_env.sh
 ```
-2) Pull datasets listed in `configs/datasets.yaml`:
+Pull datasets/models (edit configs as needed):
 ```bash
-bash scripts/get_data.sh  # or: python scripts/get_data.py --config configs/datasets.yaml --out data/raw
-```
-3) Download models listed in `configs/models.yaml` (HF auth may be required):
-```bash
-bash scripts/pull_models.sh  # or: python scripts/pull_models.py --config configs/models.yaml --out models
+bash scripts/get_data.sh
+bash scripts/pull_models.sh
 ```
 
-## Data / pipeline stages (planned)
-1) Generate CoT rollouts from reasoning models → `data/cot/`
-2) spaCy chunking of CoT → `data/chunks/` (see `src/pipeline/chunk_cot.py`)
-3) Intermediate answer extraction + labels → `data/labeled/` (see `src/pipeline/label_intermediate.py`)
-4) Hidden state dumps → `data/reps/` (see `src/pipeline/dump_hidden.py`)
-5) Probe training (correctness, change, IG) → `results/probes/` (stubs in `src/probes/`)
+Run the pipeline on a small slice (example with a tiny model):
+```bash
+# 1) Generate CoT
+python -m src.pipeline.generate_cot \
+  --model gpt2 \
+  --dataset toy \
+  --input data/raw/toy.jsonl \
+  --question-field question \
+  --answer-field answer \
+  --max-examples 5 \
+  --max-new-tokens 128
 
-## Notes
-- Pipeline entrypoints under `src/pipeline` use local Hugging Face code (no third_party wiring).
-- Zhang scripts remain in `third_party/` for reproducibility.
+# 2) Chunk
+python -m src.pipeline.chunk_cot \
+  --input data/cot/gpt2/toy_rollouts.jsonl \
+  --dataset toy
+
+# 3) Label
+python -m src.pipeline.label_intermediate \
+  --input data/chunks/segmented_toy.jsonl \
+  --dataset toy
+
+# 4) Hidden states (keep batch-size small for large models)
+python -m src.pipeline.dump_hidden \
+  --input data/labeled/labeled_intermediate_toy.jsonl \
+  --model gpt2 \
+  --dataset toy \
+  --batch-size 2 \
+  --max-length 512
+```
+
+Notes: Pipeline uses only local Hugging Face + spaCy; no third_party code is invoked. Labeling supports regex or Gemini (set `GEMINI_API_KEY`, install `google-genai`). Adjust batch sizes and max length for bigger models. Probes live under `src/probes/` and expect reps + labels.

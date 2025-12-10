@@ -1,5 +1,5 @@
 # Large/third-party
-third_party/
+reasoning_models_probing/
 
 # Local instructions/docs
 instructions.md

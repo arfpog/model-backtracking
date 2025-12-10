@@ -1,11 +1,4 @@
 #!/usr/bin/env python
-"""
-Stage 04: dump hidden states for each chunk/position.
-
-Expected output:
-- data/reps/<model>/<dataset>/part-*.pt (or similar sharded tensors)
-"""
-
 import argparse
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple

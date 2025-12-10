@@ -1,7 +1,3 @@
-"""
-Shared helpers for the trace pipeline.
-"""
-
 import json
 import re
 from pathlib import Path

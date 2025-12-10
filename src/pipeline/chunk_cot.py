@@ -1,15 +1,4 @@
 #!/usr/bin/env python
-"""
-Stage 02: chunk CoT traces into intermediate reasoning segments.
-
-Heuristics:
-- First split on blank lines (DeepSeek often uses double newlines for steps).
-- Start a new chunk when a transition keyword/phrase appears (similar to Zhang et al.).
-- Fallback to spaCy sentence splits if no blank-line structure exists.
-
-Expected output:
-- data/chunks/segmented_<dataset>.jsonl (or model/dataset-specific path)
-"""
 
 import argparse
 from pathlib import Path
