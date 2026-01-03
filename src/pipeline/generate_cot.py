@@ -13,14 +13,23 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 try:
-    from .utils import extract_intermediate_answer, read_jsonl, write_jsonl
+    from .utils import (
+        convert_answer_index_to_letter,
+        extract_intermediate_answer,
+        format_question_with_choices,
+        read_jsonl,
+        write_jsonl,
+    )
 except ImportError:
     # Allow running as a script: python src/pipeline/generate_cot.py ...
     sys.path.append(str(Path(__file__).resolve().parents[2]))
-    from src.pipeline.utils import extract_intermediate_answer, read_jsonl, write_jsonl
-
-
-INDEX_TO_LETTER = {0: "A", 1: "B", 2: "C", 3: "D"}
+    from src.pipeline.utils import (
+        convert_answer_index_to_letter,
+        extract_intermediate_answer,
+        format_question_with_choices,
+        read_jsonl,
+        write_jsonl,
+    )
 
 # Model-specific thinking tag patterns
 THINK_PATTERNS = {
@@ -111,24 +120,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0, help="Random seed for sampling.")
     parser.add_argument("--trust-remote-code", action="store_true", help="Pass through to HF loaders.")
     return parser
-
-
-def format_question_with_choices(question: str, choices: List[str]) -> str:
-    """Format a multiple-choice question with labeled choices."""
-    formatted = question.strip() + "\n\n"
-    for i, choice in enumerate(choices):
-        letter = INDEX_TO_LETTER.get(i, chr(ord("A") + i))
-        formatted += f"{letter}) {choice}\n"
-    return formatted.strip()
-
-
-def convert_answer_index_to_letter(answer: Any) -> str:
-    """Convert numeric answer index (0-3) to letter (A-D)."""
-    if isinstance(answer, int):
-        return INDEX_TO_LETTER.get(answer, str(answer))
-    if isinstance(answer, str) and answer.isdigit():
-        return INDEX_TO_LETTER.get(int(answer), answer)
-    return str(answer)
 
 
 def load_input(path: Path) -> List[Dict[str, Any]]:

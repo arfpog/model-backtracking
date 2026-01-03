@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import argparse
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -9,12 +10,13 @@ from typing import Any, Dict, List
 import datasets
 import yaml
 
-INDEX_TO_LETTER = {0: "A", 1: "B", 2: "C", 3: "D"}
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.pipeline.utils import convert_answer_index_to_letter, format_question_with_choices
 
 
 def extract_gsm8k_answer(answer_text: str) -> str:
     """Extract the final numeric answer from GSM8K format (after ####)."""
-    import re
     # GSM8K answers are formatted as: "... #### <number>"
     match = re.search(r"####\s*(-?\d+(?:[,\d]*)?(?:\.\d+)?)", answer_text)
     if match:
@@ -25,24 +27,6 @@ def extract_gsm8k_answer(answer_text: str) -> str:
     if numbers:
         return numbers[-1].replace(",", "")
     return answer_text.strip()
-
-
-def format_question_with_choices(question: str, choices: List[str]) -> str:
-    """Format a multiple-choice question with labeled choices."""
-    formatted = question.strip() + "\n\n"
-    for i, choice in enumerate(choices):
-        letter = INDEX_TO_LETTER.get(i, chr(ord("A") + i))
-        formatted += f"{letter}) {choice}\n"
-    return formatted.strip()
-
-
-def convert_answer_index_to_letter(answer: Any) -> str:
-    """Convert numeric answer index (0-3) to letter (A-D)."""
-    if isinstance(answer, int):
-        return INDEX_TO_LETTER.get(answer, str(answer))
-    if isinstance(answer, str) and answer.isdigit():
-        return INDEX_TO_LETTER.get(int(answer), answer)
-    return str(answer)
 
 
 def download_dataset(entry: dict, raw_dir: Path) -> None:

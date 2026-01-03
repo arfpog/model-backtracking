@@ -13,7 +13,6 @@ import argparse
 import itertools
 import json
 import sys
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 

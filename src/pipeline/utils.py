@@ -121,3 +121,25 @@ def extract_intermediate_answer(text: str, answer_type: str = "numeric") -> Opti
 def detect_backtrack(text: str) -> bool:
     lowered = text.lower()
     return any(keyword in lowered for keyword in BACKTRACK_KEYWORDS)
+
+
+# MMLU-style answer formatting helpers
+INDEX_TO_LETTER = {0: "A", 1: "B", 2: "C", 3: "D"}
+
+
+def format_question_with_choices(question: str, choices: List[str]) -> str:
+    """Format a multiple-choice question with labeled choices."""
+    formatted = question.strip() + "\n\n"
+    for i, choice in enumerate(choices):
+        letter = INDEX_TO_LETTER.get(i, chr(ord("A") + i))
+        formatted += f"{letter}) {choice}\n"
+    return formatted.strip()
+
+
+def convert_answer_index_to_letter(answer: Any) -> str:
+    """Convert numeric answer index (0-3) to letter (A-D)."""
+    if isinstance(answer, int):
+        return INDEX_TO_LETTER.get(answer, str(answer))
+    if isinstance(answer, str) and answer.isdigit():
+        return INDEX_TO_LETTER.get(int(answer), answer)
+    return str(answer)
