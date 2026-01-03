@@ -38,6 +38,12 @@ def normalize_answer(ans: Optional[str]) -> Optional[str]:
     if ans is None:
         return None
     cleaned = ans.strip().lower()
+
+    # Handle GSM8K format: extract number after ####
+    gsm_match = re.search(r"####\s*(-?\d+(?:,\d+)*(?:\.\d+)?)", cleaned)
+    if gsm_match:
+        cleaned = gsm_match.group(1)
+
     cleaned = cleaned.replace(",", "")
     cleaned = re.sub(r"\\boxed\s*\{([^}]*)\}", r"\1", cleaned)
     cleaned = re.sub(r"\\boxed\s*\(([^)]*)\)", r"\1", cleaned)

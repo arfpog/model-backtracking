@@ -12,6 +12,21 @@ import yaml
 INDEX_TO_LETTER = {0: "A", 1: "B", 2: "C", 3: "D"}
 
 
+def extract_gsm8k_answer(answer_text: str) -> str:
+    """Extract the final numeric answer from GSM8K format (after ####)."""
+    import re
+    # GSM8K answers are formatted as: "... #### <number>"
+    match = re.search(r"####\s*(-?\d+(?:[,\d]*)?(?:\.\d+)?)", answer_text)
+    if match:
+        # Remove commas from numbers like "1,000"
+        return match.group(1).replace(",", "")
+    # Fallback: try to get the last number
+    numbers = re.findall(r"-?\d+(?:,\d+)*(?:\.\d+)?", answer_text)
+    if numbers:
+        return numbers[-1].replace(",", "")
+    return answer_text.strip()
+
+
 def format_question_with_choices(question: str, choices: List[str]) -> str:
     """Format a multiple-choice question with labeled choices."""
     formatted = question.strip() + "\n\n"
@@ -92,6 +107,16 @@ def download_dataset(entry: dict, raw_dir: Path) -> None:
                 processed["answer_type"] = answer_type
                 f.write(json.dumps(processed, ensure_ascii=False) + "\n")
         print(f"Saved to {output_path} ({len(ds)} rows, processed for multiple-choice)")
+    elif "gsm8k" in name.lower():
+        # Process GSM8K: extract just the final number from "#### <number>" format
+        with open(output_path, "w", encoding="utf-8") as f:
+            for row in ds:
+                processed = dict(row)
+                if answer_field in row:
+                    processed[answer_field] = extract_gsm8k_answer(row[answer_field])
+                processed["answer_type"] = "numeric"
+                f.write(json.dumps(processed, ensure_ascii=False) + "\n")
+        print(f"Saved to {output_path} ({len(ds)} rows, processed for GSM8K)")
     else:
         ds.to_json(str(output_path))
         print(f"Saved to {output_path} ({len(ds)} rows)")
