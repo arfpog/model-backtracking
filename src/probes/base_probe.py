@@ -1,7 +1,3 @@
-"""
-Minimal probe definitions (linear or 1-layer MLP) plus a handy hidden-size lookup.
-"""
-
 import torch.nn as nn
 
 HS_DICT = {
