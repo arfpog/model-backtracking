@@ -188,8 +188,10 @@ def label_record(
     gt_answer = record.get("answer")
     # Use answer_type from record if not explicitly provided
     effective_answer_type = answer_type or record.get("answer_type", "numeric")
+    # Use reasoning (CoT only) or fall back to full_output/full_cot for legacy compatibility
+    cot_text = record.get("reasoning") or record.get("full_output") or record.get("full_cot", "")
     final_answer = record.get("final_answer") or extract_intermediate_answer(
-        record.get("full_cot", ""), answer_type=effective_answer_type
+        cot_text, answer_type=effective_answer_type
     )
 
     chunks = record.get("chunks", [])

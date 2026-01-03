@@ -89,12 +89,13 @@ def main() -> None:
 
     rows = []
     for record in read_jsonl(args.input):
-        full_cot = record.get("full_cot", "")
-        chunk_strings = chunk_text(nlp, matcher, full_cot, args.max_chunks)
+        # Use 'reasoning' (just CoT without final answer) if available, else fallback to full_output/full_cot
+        text_to_chunk = record.get("reasoning") or record.get("full_output") or record.get("full_cot", "")
+        chunk_strings = chunk_text(nlp, matcher, text_to_chunk, args.max_chunks)
         chunks: List[Dict[str, object]] = [
             {"chunk_idx": idx, "text": chunk} for idx, chunk in enumerate(chunk_strings)
         ]
-        final_answer = record.get("final_answer") or extract_intermediate_answer(full_cot)
+        final_answer = record.get("final_answer") or extract_intermediate_answer(text_to_chunk)
         rows.append(
             {
                 **record,

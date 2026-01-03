@@ -3,9 +3,10 @@
 import argparse
 import json
 import random
+import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Tuple
 
 import torch
 from tqdm import tqdm
@@ -20,6 +21,60 @@ except ImportError:
 
 
 INDEX_TO_LETTER = {0: "A", 1: "B", 2: "C", 3: "D"}
+
+# Model-specific thinking tag patterns
+THINK_PATTERNS = {
+    "deepseek": (r"<think>", r"</think>"),
+    "qwq": (r"<think>", r"</think>"),
+    "default": (r"<think>", r"</think>"),
+}
+
+
+def parse_reasoning_output(text: str, model_name: str = "") -> Tuple[str, str, str]:
+    """
+    Parse model output into reasoning and answer portions.
+
+    Returns:
+        (full_output, reasoning_only, answer_portion)
+    """
+    # Determine which pattern to use based on model name
+    model_lower = model_name.lower()
+    if "deepseek" in model_lower:
+        open_tag, close_tag = THINK_PATTERNS["deepseek"]
+    elif "qwq" in model_lower:
+        open_tag, close_tag = THINK_PATTERNS["qwq"]
+    else:
+        open_tag, close_tag = THINK_PATTERNS["default"]
+
+    # Try to extract thinking content
+    pattern = f"{open_tag}(.*?){close_tag}"
+    match = re.search(pattern, text, re.DOTALL)
+
+    if match:
+        reasoning = match.group(1).strip()
+        # Everything after </think> is the answer portion
+        end_pos = match.end()
+        answer_portion = text[end_pos:].strip()
+        return text, reasoning, answer_portion
+
+    # No think tags found - treat entire output as reasoning
+    # Try to split at common answer indicators
+    answer_indicators = [
+        r"\\boxed\{",
+        r"(?i)the\s+answer\s+is",
+        r"(?i)final\s+answer",
+        r"(?i)therefore,?\s+the\s+answer",
+    ]
+
+    for indicator in answer_indicators:
+        match = re.search(indicator, text)
+        if match:
+            reasoning = text[:match.start()].strip()
+            answer_portion = text[match.start():].strip()
+            return text, reasoning, answer_portion
+
+    # No clear separation found
+    return text, text, ""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -180,8 +235,13 @@ def main() -> None:
                 eos_token_id=tokenizer.eos_token_id,
             )
 
-        cot = decode_continuation(tokenizer, inputs["input_ids"], generated)
-        final_answer = extract_intermediate_answer(cot, answer_type=args.answer_type)
+        raw_output = decode_continuation(tokenizer, inputs["input_ids"], generated)
+
+        # Parse into reasoning vs answer portions
+        full_output, reasoning, answer_portion = parse_reasoning_output(raw_output, args.model)
+
+        # Extract the final answer value
+        final_answer = extract_intermediate_answer(raw_output, answer_type=args.answer_type)
 
         rows.append(
             {
@@ -192,8 +252,10 @@ def main() -> None:
                 "model": args.model,
                 "dataset": args.dataset,
                 "prompt": prompt,
-                "full_cot": cot,
-                "final_answer": final_answer,
+                "full_output": full_output,       # raw model output
+                "reasoning": reasoning,            # just the thinking/CoT part
+                "answer_portion": answer_portion,  # text after </think> or answer indicator
+                "final_answer": final_answer,      # extracted answer value
                 "metadata": {
                     "temperature": args.temperature,
                     "top_p": args.top_p,
@@ -206,9 +268,9 @@ def main() -> None:
     print(f"[generate_cot] Wrote {len(rows)} examples to {output_path}")
     # Preview a couple of generations
     for sample in rows[:3]:
-        cot_preview = sample["full_cot"][:200].replace("\n", " ")
+        reasoning_preview = sample["reasoning"][:200].replace("\n", " ")
         print(
-            f"[preview] id={sample['example_id']} | q={str(sample['question'])[:80]}... | cot={cot_preview}..."
+            f"[preview] id={sample['example_id']} | q={str(sample['question'])[:80]}... | reasoning={reasoning_preview}..."
         )
 
 
