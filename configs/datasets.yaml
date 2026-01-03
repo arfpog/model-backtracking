@@ -23,6 +23,15 @@ datasets:
     answer_field: solution
     output_name: math_easy.jsonl
 
+  - name: mmlu_stem
+    hf_id: TIGER-Lab/MMLU-STEM
+    split: test
+    text_field: question
+    answer_field: answer
+    choices_field: choices
+    answer_type: letter
+    output_name: mmlu_stem.jsonl
+
   - name: synthetic_backtracking
     local_path: data/raw/synthetic_backtracking.jsonl
     description: placeholder for controlled synthetic set; place file at local_path

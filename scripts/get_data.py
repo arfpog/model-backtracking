@@ -1,11 +1,33 @@
 #!/usr/bin/env python
 import argparse
+import json
 import shutil
 import sys
 from pathlib import Path
+from typing import Any, Dict, List
 
 import datasets
 import yaml
+
+INDEX_TO_LETTER = {0: "A", 1: "B", 2: "C", 3: "D"}
+
+
+def format_question_with_choices(question: str, choices: List[str]) -> str:
+    """Format a multiple-choice question with labeled choices."""
+    formatted = question.strip() + "\n\n"
+    for i, choice in enumerate(choices):
+        letter = INDEX_TO_LETTER.get(i, chr(ord("A") + i))
+        formatted += f"{letter}) {choice}\n"
+    return formatted.strip()
+
+
+def convert_answer_index_to_letter(answer: Any) -> str:
+    """Convert numeric answer index (0-3) to letter (A-D)."""
+    if isinstance(answer, int):
+        return INDEX_TO_LETTER.get(answer, str(answer))
+    if isinstance(answer, str) and answer.isdigit():
+        return INDEX_TO_LETTER.get(int(answer), answer)
+    return str(answer)
 
 
 def download_dataset(entry: dict, raw_dir: Path) -> None:
@@ -46,8 +68,33 @@ def download_dataset(entry: dict, raw_dir: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.exists():
         output_path.unlink()
-    ds.to_json(str(output_path))
-    print(f"Saved to {output_path} ({len(ds)} rows)")
+
+    # Check if we need to process MMLU-style data with choices
+    choices_field = entry.get("choices_field")
+    text_field = entry.get("text_field", "question")
+    answer_field = entry.get("answer_field", "answer")
+    answer_type = entry.get("answer_type")
+
+    if choices_field and answer_type == "letter":
+        # Process MMLU-style: format question with choices, convert answer to letter
+        with open(output_path, "w", encoding="utf-8") as f:
+            for row in ds:
+                processed = dict(row)
+                # Format question with choices
+                if choices_field in row and text_field in row:
+                    processed[text_field] = format_question_with_choices(
+                        row[text_field], row[choices_field]
+                    )
+                # Convert answer index to letter
+                if answer_field in row:
+                    processed[answer_field] = convert_answer_index_to_letter(row[answer_field])
+                # Add answer_type for downstream processing
+                processed["answer_type"] = answer_type
+                f.write(json.dumps(processed, ensure_ascii=False) + "\n")
+        print(f"Saved to {output_path} ({len(ds)} rows, processed for multiple-choice)")
+    else:
+        ds.to_json(str(output_path))
+        print(f"Saved to {output_path} ({len(ds)} rows)")
 
 
 def main() -> None:

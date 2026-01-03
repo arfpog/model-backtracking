@@ -19,6 +19,9 @@ except ImportError:
     from src.pipeline.utils import extract_intermediate_answer, read_jsonl, write_jsonl
 
 
+INDEX_TO_LETTER = {0: "A", 1: "B", 2: "C", 3: "D"}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate CoT rollouts.")
     parser.add_argument("--model", required=True, help="Model name or HF id.")
@@ -26,6 +29,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, help="Dataset path (JSON/JSONL).")
     parser.add_argument("--question-field", default="question", help="Field name for question text.")
     parser.add_argument("--answer-field", default="answer", help="Field name for ground-truth answer.")
+    parser.add_argument("--choices-field", default=None, help="Field name for answer choices (for MMLU-style).")
+    parser.add_argument(
+        "--answer-type",
+        choices=["numeric", "letter", "auto"],
+        default="numeric",
+        help="Answer type: numeric (GSM8K/MATH), letter (MMLU), or auto.",
+    )
     parser.add_argument("--id-field", default="id", help="Field name for example id (optional).")
     parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature.")
     parser.add_argument("--top-p", type=float, default=0.95, help="Top-p sampling.")
@@ -35,8 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dtype", default=None, help="Optional torch dtype, e.g., float16 or bfloat16.")
     parser.add_argument(
         "--prompt-prefix",
-        default="Please reason step by step, and put your final answer within \\boxed{}.",
-        help="Instruction appended after the question.",
+        default=None,
+        help="Instruction appended after the question. Defaults based on answer-type.",
     )
     parser.add_argument(
         "--output",
@@ -46,6 +56,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0, help="Random seed for sampling.")
     parser.add_argument("--trust-remote-code", action="store_true", help="Pass through to HF loaders.")
     return parser
+
+
+def format_question_with_choices(question: str, choices: List[str]) -> str:
+    """Format a multiple-choice question with labeled choices."""
+    formatted = question.strip() + "\n\n"
+    for i, choice in enumerate(choices):
+        letter = INDEX_TO_LETTER.get(i, chr(ord("A") + i))
+        formatted += f"{letter}) {choice}\n"
+    return formatted.strip()
+
+
+def convert_answer_index_to_letter(answer: Any) -> str:
+    """Convert numeric answer index (0-3) to letter (A-D)."""
+    if isinstance(answer, int):
+        return INDEX_TO_LETTER.get(answer, str(answer))
+    if isinstance(answer, str) and answer.isdigit():
+        return INDEX_TO_LETTER.get(int(answer), answer)
+    return str(answer)
 
 
 def load_input(path: Path) -> List[Dict[str, Any]]:
@@ -79,10 +107,20 @@ def decode_continuation(tokenizer, prompt_ids, generated_ids) -> str:
     return tokenizer.batch_decode(continuation, skip_special_tokens=True)[0]
 
 
+def get_default_prompt_prefix(answer_type: str) -> str:
+    """Get default prompt prefix based on answer type."""
+    if answer_type == "letter":
+        return "Please reason step by step, then provide your final answer as a single letter (A, B, C, or D)."
+    return "Please reason step by step, and put your final answer within \\boxed{}."
+
+
 def main() -> None:
     args = build_parser().parse_args()
     random.seed(args.seed)
     torch.manual_seed(args.seed)
+
+    # Set default prompt prefix based on answer type if not provided
+    prompt_prefix = args.prompt_prefix or get_default_prompt_prefix(args.answer_type)
 
     dtype = getattr(torch, args.dtype) if args.dtype else None
     device = select_device(args.device)
@@ -118,7 +156,16 @@ def main() -> None:
         if question is None:
             continue
 
-        prompt = build_prompt(str(question), args.prompt_prefix)
+        # Handle MMLU-style questions with choices
+        if args.choices_field and args.choices_field in example:
+            choices = example[args.choices_field]
+            question = format_question_with_choices(str(question), choices)
+
+        # Convert answer index to letter for MMLU-style
+        if args.answer_type == "letter":
+            gt_answer = convert_answer_index_to_letter(gt_answer)
+
+        prompt = build_prompt(str(question), prompt_prefix)
         inputs = tokenizer(prompt, return_tensors="pt")
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
@@ -134,13 +181,14 @@ def main() -> None:
             )
 
         cot = decode_continuation(tokenizer, inputs["input_ids"], generated)
-        final_answer = extract_intermediate_answer(cot)
+        final_answer = extract_intermediate_answer(cot, answer_type=args.answer_type)
 
         rows.append(
             {
                 "example_id": str(example_id),
                 "question": question,
                 "answer": gt_answer,
+                "answer_type": args.answer_type,
                 "model": args.model,
                 "dataset": args.dataset,
                 "prompt": prompt,

@@ -52,20 +52,64 @@ def answers_match(a: Optional[str], b: Optional[str]) -> bool:
     return na is not None and nb is not None and na == nb
 
 
-def extract_intermediate_answer(text: str) -> Optional[str]:
+def extract_intermediate_answer(text: str, answer_type: str = "numeric") -> Optional[str]:
+    """
+    Extract intermediate answer from reasoning text.
+
+    Args:
+        text: The reasoning text to extract from.
+        answer_type: "numeric" (GSM8K/MATH), "letter" (MMLU), or "auto".
+            - "numeric": prioritizes boxed expressions and numbers
+            - "letter": prioritizes letter choices (A-E)
+            - "auto": tries all methods in order
+    """
+    # Common patterns
     boxed = re.findall(r"\\boxed\s*[({]?([^}\)]*)[)}]?", text)
-    if boxed:
-        return boxed[-1].strip()
-    explicit = re.findall(r"(?i)answer\s*[:=]\s*([A-Za-z0-9\.\-/]+)", text)
-    if explicit:
-        return explicit[-1].strip()
+    explicit_letter = re.findall(r"(?i)(?:the\s+)?answer\s+is\s*:?\s*([A-E])\b", text)
+    explicit_general = re.findall(r"(?i)answer\s*[:=]\s*([A-Za-z0-9\.\-/]+)", text)
     numbers = re.findall(r"-?\d+(?:\.\d+)?", text)
-    if numbers:
-        return numbers[-1]
-    letters = re.findall(r"\\b([A-E])\\b", text)
-    if letters:
-        return letters[-1]
-    return None
+    letters = re.findall(r"\b([A-E])\b", text)
+
+    if answer_type == "letter":
+        # For multiple choice: prioritize letter extraction
+        if explicit_letter:
+            return explicit_letter[-1].strip().upper()
+        if letters:
+            return letters[-1].upper()
+        if boxed:
+            # Check if boxed contains a letter
+            boxed_content = boxed[-1].strip()
+            if re.match(r"^[A-E]$", boxed_content, re.I):
+                return boxed_content.upper()
+            return boxed_content
+        if explicit_general:
+            return explicit_general[-1].strip()
+        return None
+
+    elif answer_type == "numeric":
+        # For math problems: prioritize numeric extraction
+        if boxed:
+            return boxed[-1].strip()
+        if explicit_general:
+            return explicit_general[-1].strip()
+        if numbers:
+            return numbers[-1]
+        if letters:
+            return letters[-1].upper()
+        return None
+
+    else:  # auto - try everything
+        if boxed:
+            return boxed[-1].strip()
+        if explicit_letter:
+            return explicit_letter[-1].strip().upper()
+        if explicit_general:
+            return explicit_general[-1].strip()
+        if numbers:
+            return numbers[-1]
+        if letters:
+            return letters[-1].upper()
+        return None
 
 
 def detect_backtrack(text: str) -> bool:

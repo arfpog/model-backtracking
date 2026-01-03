@@ -40,6 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output JSONL path. Defaults to data/labeled/labeled_intermediate_<dataset>.jsonl",
     )
     parser.add_argument(
+        "--answer-type",
+        choices=["numeric", "letter", "auto"],
+        default=None,
+        help="Answer type for extraction. If not set, uses value from input data or defaults to 'numeric'.",
+    )
+    parser.add_argument(
         "--labeling-mode",
         choices=["regex", "gemini"],
         default="regex",
@@ -173,9 +179,18 @@ def gemini_label_chunks(record: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[int
     return labels
 
 
-def label_record(record: Dict[str, Any], mode: str = "regex", gemini_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def label_record(
+    record: Dict[str, Any],
+    mode: str = "regex",
+    gemini_cfg: Optional[Dict[str, Any]] = None,
+    answer_type: Optional[str] = None,
+) -> Dict[str, Any]:
     gt_answer = record.get("answer")
-    final_answer = record.get("final_answer") or extract_intermediate_answer(record.get("full_cot", ""))
+    # Use answer_type from record if not explicitly provided
+    effective_answer_type = answer_type or record.get("answer_type", "numeric")
+    final_answer = record.get("final_answer") or extract_intermediate_answer(
+        record.get("full_cot", ""), answer_type=effective_answer_type
+    )
 
     chunks = record.get("chunks", [])
     gemini_labels = gemini_label_chunks(record, gemini_cfg) if mode == "gemini" and gemini_cfg else {}
@@ -191,7 +206,7 @@ def label_record(record: Dict[str, Any], mode: str = "regex", gemini_cfg: Option
         intermediate = (
             glabel.get("intermediate_answer")
             or chunk.get("intermediate_answer")
-            or extract_intermediate_answer(text)
+            or extract_intermediate_answer(text, answer_type=effective_answer_type)
         )
         chunk["intermediate_answer"] = intermediate
 
@@ -255,7 +270,10 @@ def main() -> None:
             "max_tokens": args.gemini_max_tokens,
         }
 
-    labeled = [label_record(record, args.labeling_mode, gemini_cfg) for record in read_jsonl(args.input)]
+    labeled = [
+        label_record(record, args.labeling_mode, gemini_cfg, args.answer_type)
+        for record in read_jsonl(args.input)
+    ]
     write_jsonl(output_path, labeled)
     print(f"Wrote {len(labeled)} labeled examples to {output_path}")
 
