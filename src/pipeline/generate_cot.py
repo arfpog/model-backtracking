@@ -2,6 +2,11 @@
 """
 Generate Chain-of-Thought rollouts using either local models or OpenRouter API.
 
+Features:
+- Multiple rollouts per question (--num-rollouts)
+- Degenerate response detection and retry
+- Configurable quality filters
+
 Usage:
   # Local model
   python -m src.pipeline.generate_cot --model deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B ...
@@ -48,6 +53,135 @@ THINK_PATTERNS = {
 }
 
 
+# =============================================================================
+# Degenerate Response Detection
+# =============================================================================
+
+
+def is_degenerate(text: str, min_length: int = 50, max_repeat_ratio: float = 0.5) -> Tuple[bool, str]:
+    """
+    Check if a response is degenerate.
+
+    Returns:
+        (is_degenerate, reason)
+    """
+    if not text or not text.strip():
+        return True, "empty"
+
+    text = text.strip()
+
+    # Too short
+    if len(text) < min_length:
+        return True, f"too_short ({len(text)} chars)"
+
+    # Check for excessive repetition
+    words = text.lower().split()
+    if len(words) > 10:
+        # Check for repeated phrases (n-grams)
+        for n in [3, 4, 5]:
+            if len(words) >= n * 2:
+                ngrams = [" ".join(words[i : i + n]) for i in range(len(words) - n + 1)]
+                unique_ratio = len(set(ngrams)) / len(ngrams)
+                if unique_ratio < (1 - max_repeat_ratio):
+                    return True, f"repetitive ({n}-grams unique ratio: {unique_ratio:.2f})"
+
+    # Check for character-level repetition (e.g., "aaaaa" or "123123123")
+    if len(text) > 100:
+        # Check if any single character dominates
+        char_counts = {}
+        for c in text:
+            char_counts[c] = char_counts.get(c, 0) + 1
+        max_char_ratio = max(char_counts.values()) / len(text)
+        if max_char_ratio > 0.3 and max(char_counts, key=char_counts.get) not in " \n":
+            return True, f"char_repetition (max char ratio: {max_char_ratio:.2f})"
+
+    # Check for repeated lines
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if len(lines) > 5:
+        unique_lines = set(lines)
+        if len(unique_lines) / len(lines) < 0.3:
+            return True, "repeated_lines"
+
+    # Check for truncation indicators
+    truncation_patterns = [
+        r"\.\.\.$",  # Ends with ...
+        r"I'll continue",  # Incomplete
+        r"Let me finish",
+        r"\[truncated\]",
+        r"\[continued\]",
+    ]
+    for pattern in truncation_patterns:
+        if re.search(pattern, text[-100:], re.IGNORECASE):
+            return True, "truncated"
+
+    return False, "ok"
+
+
+def has_valid_reasoning(text: str, model_name: str = "") -> Tuple[bool, str]:
+    """
+    Check if response contains valid reasoning structure.
+
+    Returns:
+        (is_valid, reason)
+    """
+    # Check for think tags if expected
+    model_lower = model_name.lower()
+    if "deepseek" in model_lower or "qwq" in model_lower:
+        if "<think>" in text and "</think>" not in text:
+            return False, "unclosed_think_tag"
+
+    # Check for some reasoning indicators
+    reasoning_indicators = [
+        r"\blet\s+me\b",
+        r"\bfirst\b",
+        r"\bstep\b",
+        r"\bcalculat",
+        r"\bsolv",
+        r"\bthink",
+        r"\bconsider",
+        r"\bso\b",
+        r"\btherefore\b",
+        r"\bbecause\b",
+        r"=",  # Math operations
+    ]
+
+    indicator_count = sum(1 for p in reasoning_indicators if re.search(p, text, re.IGNORECASE))
+    if indicator_count < 2:
+        return False, "no_reasoning_structure"
+
+    return True, "ok"
+
+
+def validate_response(
+    text: str,
+    model_name: str = "",
+    min_length: int = 50,
+    max_repeat_ratio: float = 0.5,
+) -> Tuple[bool, str]:
+    """
+    Validate a response for quality.
+
+    Returns:
+        (is_valid, reason)
+    """
+    # Check for degenerate patterns
+    is_degen, reason = is_degenerate(text, min_length, max_repeat_ratio)
+    if is_degen:
+        return False, f"degenerate:{reason}"
+
+    # Check for valid reasoning
+    is_valid, reason = has_valid_reasoning(text, model_name)
+    if not is_valid:
+        return False, f"invalid:{reason}"
+
+    return True, "ok"
+
+
+# =============================================================================
+# Response Parsing
+# =============================================================================
+
+
 def parse_reasoning_output(text: str, model_name: str = "") -> Tuple[str, str, str]:
     """
     Parse model output into reasoning and answer portions.
@@ -90,6 +224,11 @@ def parse_reasoning_output(text: str, model_name: str = "") -> Tuple[str, str, s
     return text, text, ""
 
 
+# =============================================================================
+# Argument Parsing
+# =============================================================================
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate CoT rollouts.")
     parser.add_argument("--model", required=True, help="Model name/id (HF or OpenRouter).")
@@ -120,6 +259,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output JSONL path. Defaults to data/cot/<model>/<dataset>_rollouts.jsonl",
     )
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
+
+    # Multiple rollouts
+    parser.add_argument(
+        "--num-rollouts",
+        type=int,
+        default=1,
+        help="Number of rollouts per question.",
+    )
+
+    # Retry and validation
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Max retries for degenerate responses.",
+    )
+    parser.add_argument(
+        "--min-response-length",
+        type=int,
+        default=50,
+        help="Minimum response length (chars) to be valid.",
+    )
+    parser.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help="Skip response validation (accept all responses).",
+    )
 
     # API vs local options
     parser.add_argument(
@@ -230,11 +396,17 @@ def run_openrouter(args, data: List[Dict], prompt_prefix: str) -> List[Dict[str,
         raise SystemExit("Set OPENROUTER_API_KEY or pass --api-key for OpenRouter.")
 
     rows: List[Dict[str, Any]] = []
-    for idx, example in enumerate(tqdm(data, desc="Generating (OpenRouter)")):
+    stats = {"total": 0, "success": 0, "retries": 0, "failed": 0}
+
+    total_iterations = len(data) * args.num_rollouts
+    pbar = tqdm(total=total_iterations, desc="Generating (OpenRouter)")
+
+    for idx, example in enumerate(data):
         question = example.get(args.question_field)
         gt_answer = example.get(args.answer_field)
         example_id = example.get(args.id_field, idx)
         if question is None:
+            pbar.update(args.num_rollouts)
             continue
 
         if args.choices_field and args.choices_field in example:
@@ -246,47 +418,96 @@ def run_openrouter(args, data: List[Dict], prompt_prefix: str) -> List[Dict[str,
 
         prompt = build_prompt(str(question), prompt_prefix)
 
-        raw_output = generate_openrouter(
-            prompt=prompt,
-            model=args.model,
-            api_key=api_key,
-            api_base=args.api_base,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            max_tokens=args.max_new_tokens,
-        )
+        # Generate multiple rollouts
+        for rollout_idx in range(args.num_rollouts):
+            stats["total"] += 1
+            raw_output = None
+            validation_reason = "no_response"
 
-        if raw_output is None:
-            print(f"[warning] Skipping example {example_id} due to API error")
-            continue
+            # Retry loop for degenerate responses
+            for retry in range(args.max_retries):
+                raw_output = generate_openrouter(
+                    prompt=prompt,
+                    model=args.model,
+                    api_key=api_key,
+                    api_base=args.api_base,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    max_tokens=args.max_new_tokens,
+                )
 
-        full_output, reasoning, answer_portion = parse_reasoning_output(raw_output, args.model)
-        final_answer = extract_intermediate_answer(raw_output, answer_type=args.answer_type)
+                if raw_output is None:
+                    validation_reason = "api_error"
+                    time.sleep(args.rate_limit_delay * 2)  # Extra delay on error
+                    continue
 
-        rows.append(
-            {
-                "example_id": str(example_id),
-                "question": question,
-                "answer": gt_answer,
-                "answer_type": args.answer_type,
-                "model": args.model,
-                "dataset": args.dataset,
-                "prompt": prompt,
-                "full_output": full_output,
-                "reasoning": reasoning,
-                "answer_portion": answer_portion,
-                "final_answer": final_answer,
-                "metadata": {
-                    "temperature": args.temperature,
-                    "top_p": args.top_p,
-                    "max_new_tokens": args.max_new_tokens,
-                    "api": "openrouter",
-                },
-            }
-        )
+                # Validate response
+                if args.skip_validation:
+                    break
 
-        # Rate limiting
-        time.sleep(args.rate_limit_delay)
+                is_valid, validation_reason = validate_response(
+                    raw_output,
+                    args.model,
+                    args.min_response_length,
+                )
+
+                if is_valid:
+                    break
+
+                # Log retry
+                if retry < args.max_retries - 1:
+                    stats["retries"] += 1
+                    tqdm.write(
+                        f"[retry {retry + 1}/{args.max_retries}] example={example_id} "
+                        f"rollout={rollout_idx} reason={validation_reason}"
+                    )
+                    time.sleep(args.rate_limit_delay)
+
+            # Check if we got a valid response
+            if raw_output is None or (not args.skip_validation and not is_valid):
+                stats["failed"] += 1
+                tqdm.write(
+                    f"[failed] example={example_id} rollout={rollout_idx} reason={validation_reason}"
+                )
+                pbar.update(1)
+                time.sleep(args.rate_limit_delay)
+                continue
+
+            stats["success"] += 1
+            full_output, reasoning, answer_portion = parse_reasoning_output(raw_output, args.model)
+            final_answer = extract_intermediate_answer(raw_output, answer_type=args.answer_type)
+
+            rows.append(
+                {
+                    "example_id": str(example_id),
+                    "rollout_idx": rollout_idx,
+                    "question": question,
+                    "answer": gt_answer,
+                    "answer_type": args.answer_type,
+                    "model": args.model,
+                    "dataset": args.dataset,
+                    "prompt": prompt,
+                    "full_output": full_output,
+                    "reasoning": reasoning,
+                    "answer_portion": answer_portion,
+                    "final_answer": final_answer,
+                    "metadata": {
+                        "temperature": args.temperature,
+                        "top_p": args.top_p,
+                        "max_new_tokens": args.max_new_tokens,
+                        "api": "openrouter",
+                    },
+                }
+            )
+
+            pbar.update(1)
+            time.sleep(args.rate_limit_delay)
+
+    pbar.close()
+
+    # Print stats
+    print(f"\n[stats] total={stats['total']} success={stats['success']} "
+          f"retries={stats['retries']} failed={stats['failed']}")
 
     return rows
 
@@ -334,11 +555,17 @@ def run_local(args, data: List[Dict], prompt_prefix: str) -> List[Dict[str, Any]
     model.eval()
 
     rows: List[Dict[str, Any]] = []
-    for idx, example in enumerate(tqdm(data, desc="Generating (local)")):
+    stats = {"total": 0, "success": 0, "retries": 0, "failed": 0}
+
+    total_iterations = len(data) * args.num_rollouts
+    pbar = tqdm(total=total_iterations, desc="Generating (local)")
+
+    for idx, example in enumerate(data):
         question = example.get(args.question_field)
         gt_answer = example.get(args.answer_field)
         example_id = example.get(args.id_field, idx)
         if question is None:
+            pbar.update(args.num_rollouts)
             continue
 
         if args.choices_field and args.choices_field in example:
@@ -352,42 +579,94 @@ def run_local(args, data: List[Dict], prompt_prefix: str) -> List[Dict[str, Any]
         inputs = tokenizer(prompt, return_tensors="pt")
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
-        with torch.no_grad():
-            generated = model.generate(
-                **inputs,
-                max_new_tokens=args.max_new_tokens,
-                do_sample=True,
-                temperature=args.temperature,
-                top_p=args.top_p,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
+        # Generate multiple rollouts
+        for rollout_idx in range(args.num_rollouts):
+            stats["total"] += 1
+            raw_output = None
+            validation_reason = "no_response"
+
+            # Retry loop for degenerate responses
+            for retry in range(args.max_retries):
+                # Set different seed for each retry
+                torch.manual_seed(args.seed + idx * 1000 + rollout_idx * 100 + retry)
+
+                with torch.no_grad():
+                    generated = model.generate(
+                        **inputs,
+                        max_new_tokens=args.max_new_tokens,
+                        do_sample=True,
+                        temperature=args.temperature,
+                        top_p=args.top_p,
+                        pad_token_id=tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                    )
+
+                raw_output = decode_continuation(tokenizer, inputs["input_ids"], generated)
+
+                # Validate response
+                if args.skip_validation:
+                    break
+
+                is_valid, validation_reason = validate_response(
+                    raw_output,
+                    args.model,
+                    args.min_response_length,
+                )
+
+                if is_valid:
+                    break
+
+                # Log retry
+                if retry < args.max_retries - 1:
+                    stats["retries"] += 1
+                    tqdm.write(
+                        f"[retry {retry + 1}/{args.max_retries}] example={example_id} "
+                        f"rollout={rollout_idx} reason={validation_reason}"
+                    )
+
+            # Check if we got a valid response
+            if raw_output is None or (not args.skip_validation and not is_valid):
+                stats["failed"] += 1
+                tqdm.write(
+                    f"[failed] example={example_id} rollout={rollout_idx} reason={validation_reason}"
+                )
+                pbar.update(1)
+                continue
+
+            stats["success"] += 1
+            full_output, reasoning, answer_portion = parse_reasoning_output(raw_output, args.model)
+            final_answer = extract_intermediate_answer(raw_output, answer_type=args.answer_type)
+
+            rows.append(
+                {
+                    "example_id": str(example_id),
+                    "rollout_idx": rollout_idx,
+                    "question": question,
+                    "answer": gt_answer,
+                    "answer_type": args.answer_type,
+                    "model": args.model,
+                    "dataset": args.dataset,
+                    "prompt": prompt,
+                    "full_output": full_output,
+                    "reasoning": reasoning,
+                    "answer_portion": answer_portion,
+                    "final_answer": final_answer,
+                    "metadata": {
+                        "temperature": args.temperature,
+                        "top_p": args.top_p,
+                        "max_new_tokens": args.max_new_tokens,
+                        "api": "local",
+                    },
+                }
             )
 
-        raw_output = decode_continuation(tokenizer, inputs["input_ids"], generated)
-        full_output, reasoning, answer_portion = parse_reasoning_output(raw_output, args.model)
-        final_answer = extract_intermediate_answer(raw_output, answer_type=args.answer_type)
+            pbar.update(1)
 
-        rows.append(
-            {
-                "example_id": str(example_id),
-                "question": question,
-                "answer": gt_answer,
-                "answer_type": args.answer_type,
-                "model": args.model,
-                "dataset": args.dataset,
-                "prompt": prompt,
-                "full_output": full_output,
-                "reasoning": reasoning,
-                "answer_portion": answer_portion,
-                "final_answer": final_answer,
-                "metadata": {
-                    "temperature": args.temperature,
-                    "top_p": args.top_p,
-                    "max_new_tokens": args.max_new_tokens,
-                    "api": "local",
-                },
-            }
-        )
+    pbar.close()
+
+    # Print stats
+    print(f"\n[stats] total={stats['total']} success={stats['success']} "
+          f"retries={stats['retries']} failed={stats['failed']}")
 
     return rows
 
@@ -411,6 +690,9 @@ def main() -> None:
         data = data[: args.max_examples]
         print(f"[generate_cot] Truncated to {len(data)} rows due to --max-examples")
 
+    print(f"[generate_cot] Generating {args.num_rollouts} rollout(s) per question")
+    print(f"[generate_cot] Max retries for degenerate responses: {args.max_retries}")
+
     # Run generation
     if args.api == "openrouter":
         rows = run_openrouter(args, data, prompt_prefix)
@@ -423,13 +705,14 @@ def main() -> None:
     output_path = args.output or default_out
 
     write_jsonl(output_path, rows)
-    print(f"[generate_cot] Wrote {len(rows)} examples to {output_path}")
+    print(f"[generate_cot] Wrote {len(rows)} rollouts to {output_path}")
 
     # Preview
     for sample in rows[:3]:
         reasoning_preview = sample["reasoning"][:200].replace("\n", " ")
         print(
-            f"[preview] id={sample['example_id']} | q={str(sample['question'])[:80]}... | reasoning={reasoning_preview}..."
+            f"[preview] id={sample['example_id']} rollout={sample.get('rollout_idx', 0)} | "
+            f"q={str(sample['question'])[:60]}... | reasoning={reasoning_preview}..."
         )
 
 
