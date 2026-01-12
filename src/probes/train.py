@@ -281,13 +281,25 @@ def load_shards(data_dir: Path, split: str = "train") -> List[Path]:
 def train_val_split(
     shards: List[Path], val_ratio: float = 0.2, seed: int = 42
 ) -> Tuple[List[Path], List[Path]]:
-    """Split shards into train/val."""
+    """Split shards into train/val.
+
+    If there are very few shards (<=2), we return all shards for both
+    train and val, and the split will happen at sample level instead.
+    """
     import random
 
     random.seed(seed)
     shards = list(shards)
     random.shuffle(shards)
+
+    # If only 1-2 shards, can't split at shard level - use all for both
+    # The actual split will happen at sample level in the dataset
+    if len(shards) <= 2:
+        return shards, shards
+
     split_idx = int(len(shards) * (1 - val_ratio))
+    # Ensure at least 1 shard in each split
+    split_idx = max(1, min(split_idx, len(shards) - 1))
     return shards[:split_idx], shards[split_idx:]
 
 
@@ -328,9 +340,57 @@ def main() -> None:
 
     print(f"Train shards: {len(train_shards)}, Val shards: {len(val_shards)}")
 
-    # Create datasets
-    train_dataset = ProbeDataset(train_shards, label_key=args.label_key)
-    val_dataset = ProbeDataset(val_shards, label_key=args.label_key)
+    # Check if we need sample-level splitting (when shards are shared)
+    same_shards = set(train_shards) == set(val_shards)
+
+    if same_shards:
+        # Load all data and split at sample level
+        print("Few shards detected - splitting at sample level instead")
+        full_dataset = ProbeDataset(shards, label_key=args.label_key)
+        n_total = len(full_dataset)
+        n_val = int(n_total * args.val_ratio)
+        n_train = n_total - n_val
+
+        # Shuffle indices
+        import random
+        random.seed(args.seed)
+        indices = list(range(n_total))
+        random.shuffle(indices)
+
+        train_indices = indices[:n_train]
+        val_indices = indices[n_train:]
+
+        # Create subset datasets
+        train_dataset = torch.utils.data.Subset(full_dataset, train_indices)
+        val_dataset = torch.utils.data.Subset(full_dataset, val_indices)
+
+        # Wrap to preserve get_class_weights method
+        class SubsetWithWeights:
+            def __init__(self, subset, full_ds, indices):
+                self.subset = subset
+                self.full_ds = full_ds
+                self.indices = indices
+
+            def __len__(self):
+                return len(self.subset)
+
+            def __getitem__(self, idx):
+                return self.subset[idx]
+
+            def get_class_weights(self):
+                labels = torch.tensor([self.full_ds.labels[i] for i in self.indices], dtype=torch.float)
+                num_pos = labels.sum().item()
+                num_neg = len(labels) - num_pos
+                if num_pos == 0:
+                    return torch.tensor(1.0)
+                return torch.tensor(num_neg / num_pos)
+
+        train_dataset = SubsetWithWeights(train_dataset, full_dataset, train_indices)
+        val_dataset = SubsetWithWeights(val_dataset, full_dataset, val_indices)
+    else:
+        # Normal shard-level split
+        train_dataset = ProbeDataset(train_shards, label_key=args.label_key)
+        val_dataset = ProbeDataset(val_shards, label_key=args.label_key)
 
     print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
