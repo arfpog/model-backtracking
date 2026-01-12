@@ -138,7 +138,7 @@ def train_epoch(
     model.train()
     total_loss = 0.0
     for x, y in loader:
-        x = x.to(device)
+        x = x.float().to(device)  # Convert to float32 (handles bfloat16 hidden states)
         y = y.float().to(device).unsqueeze(1)
 
         optimizer.zero_grad()
@@ -165,7 +165,7 @@ def evaluate(
 
     with torch.no_grad():
         for x, y in loader:
-            x = x.to(device)
+            x = x.float().to(device)  # Convert to float32 (handles bfloat16 hidden states)
             y_t = y.float().to(device).unsqueeze(1)
 
             logits = model(x)
