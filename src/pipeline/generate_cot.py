@@ -369,6 +369,8 @@ def generate_openrouter(
         "temperature": temperature,
         "top_p": top_p,
         "max_tokens": max_tokens,
+        # Include reasoning tokens (think tags) in output for reasoning models
+        "include_reasoning": True,
         # Route to highest throughput providers for faster generation
         "provider": {
             "sort": "throughput",
@@ -385,7 +387,14 @@ def generate_openrouter(
         )
         response.raise_for_status()
         result = response.json()
-        return result["choices"][0]["message"]["content"]
+        message = result["choices"][0]["message"]
+        content = message.get("content", "")
+        # Some providers return reasoning in a separate field
+        reasoning = message.get("reasoning", "") or message.get("reasoning_content", "")
+        if reasoning and "<think>" not in content:
+            # Combine reasoning and content with think tags
+            return f"<think>\n{reasoning}\n</think>\n{content}"
+        return content
     except requests.exceptions.RequestException as e:
         print(f"[openrouter] API error: {e}")
         return None
