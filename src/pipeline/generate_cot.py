@@ -369,6 +369,11 @@ def generate_openrouter(
         "temperature": temperature,
         "top_p": top_p,
         "max_tokens": max_tokens,
+        # Route to highest throughput providers for faster generation
+        "provider": {
+            "order": ["Throughput"],
+            "allow_fallbacks": True,
+        },
     }
 
     try:
