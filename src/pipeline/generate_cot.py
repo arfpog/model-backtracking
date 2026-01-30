@@ -371,7 +371,7 @@ def generate_openrouter(
         "max_tokens": max_tokens,
         # Route to highest throughput providers for faster generation
         "provider": {
-            "order": ["Throughput"],
+            "sort": "throughput",
             "allow_fallbacks": True,
         },
     }
